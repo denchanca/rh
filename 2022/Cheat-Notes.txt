@@ -1,0 +1,49 @@
+How to use (super quick)
+
+Upload your binaries (SQL ISOs per edition, CU EXE, LGPO.exe, agent installers) to your artifact store.
+
+Generate a manifest.json with checksums using:
+powershell -File scripts/New-ArtifactManifest.ps1 -SourcePath <local-folder> -BaseUrl https://<artifact-host>/
+Then place it at C:\Stage\manifest.json during build (the Packer scripts expect it there).
+
+Trigger the ADO pipeline with parameter edition = Enterprise | Standard | Developer.
+
+Boot-validate a temp VM using the Pester tests.
+
+Publish to Shared Image Gallery and replicate.
+
+Post-deploy: run Ansible postdeploy.yml to join domain, enroll agents (Tanium, etc.), configure/activate SQL & apply CU, bind cert via AKV (use Bind-SqlServerCertificate.ps1 with the cert’s thumbprint).
+
+Notes & best practices
+
+Agents/clients/libraries are staged in the image; enrollment is strictly post-deploy with AKV secrets.
+
+SQL CUs: we stage the CU media; apply at post-deploy for agility, or rebuild images on a monthly cadence if you want the CU baked-in.
+
+AKV cert rotation: VM extension handles retrieval/renewal; you bind certs to SQL endpoints with Bind-SqlServerCertificate.ps1.
+
+Licensing hygiene: Azure dynamic inventory is filtered to count only Lifecycle=Active + running VMs; enable Overwrite on sync in AAP.
+
+
+
+This archive contains everything we built:
+
+Packer templates for SQL Enterprise, Standard, and Developer
+
+Azure DevOps pipeline YAML (parameterized + policy guard)
+
+PowerShell scripts for prereqs, hardening, prestaging, and sysprep
+
+Artifact manifest template + generator
+
+AKV integration templates (Terraform + Bicep)
+
+SQL cert binding script
+
+Ansible post-deploy playbooks/roles (domain join, agent enrollment, SQL config)
+
+Dynamic inventory + group vars
+
+Pester validation tests
+
+README_TURNKEY.md with step-by-step usage

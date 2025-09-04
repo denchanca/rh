@@ -1,0 +1,44 @@
+Jira Task List – QA & Implementation for Win2022 SQL Golden Images
+
+Task 1 – Artifact Preparation
+- Upload required binaries (SQL ISOs for Enterprise, Standard, Developer; latest SQL CU EXE; LGPO.exe; agent installers for CrowdStrike/Tanium/Splunk; .NET; VC++) to artifact storage.
+- Generate manifest.json using scripts/New-ArtifactManifest.ps1 with SHA-256 hashes.
+- Commit manifest.json into repo under images/common/artifacts/.
+
+Task 2 – Packer Build Validation
+- Review and commit Packer JSON templates (Win2022-SQLEnterprise.json, Win2022-SQLStandard.json, Win2022-SQLDeveloper.json).
+- Run packer validate against each template.
+- Confirm winrm_use_ssl=true and winrm_insecure=false.
+- Verify provisioner scripts (00_prereq.ps1, 10_hardening.ps1, 20_prestage.ps1, 99_sysprep.ps1) run cleanly.
+
+Task 3 – Azure DevOps Pipeline
+- Import azure-pipelines.yml into ADO project.
+- Parameterize builds by SQL edition.
+- Add policy-guard.sh check in Validate stage.
+- Link pipeline to AKV variable group for secrets (WinRM certs, SQL SA password, etc.).
+- Run a dry-run build for SQL Developer edition.
+
+Task 4 – Post-Build Validation
+- Deploy a VM from each built image (Enterprise, Standard, Developer).
+- Run Pester tests (tests/Validate-ImageBaseline.Tests.ps1) to confirm TLS 1.2 enforcement, staged SQL media/CU, staged agent installers (not enrolled), LGPO baseline applied.
+- Validate sysprep logs and boot consistency.
+
+Task 5 – AKV Integration
+- Deploy AKV VM extension using Terraform or Bicep template.
+- Confirm certs are retrieved into LocalMachine\My.
+- Run Bind-SqlServerCertificate.ps1 to bind cert to SQL instance and enforce TLS.
+- Test auto-renewal and rebind after renewal.
+
+Task 6 – Ansible Post-Deploy QA
+- Run ansible/playbooks/postdeploy.yml against a dev VM.
+- Confirm domain join and OU placement.
+- Verify Tanium and CrowdStrike enrollment only when enabled via vars.
+- Confirm SQL instance configuration, CU application, and SA password injection from AKV.
+- Validate DFS/DNS orchestration tasks.
+- Document any environment differences (Dev vs Stage vs Prod).
+
+Task 7 – Documentation & Handoff
+- Update README_TURNKEY.md with final artifact URLs, SHA256s, Key Vault names.
+- Publish implementation guide to Confluence/SharePoint.
+- Tag images in SIG with Edition and Lifecycle=Active.
+- Define and schedule monthly CU refresh cadence.
