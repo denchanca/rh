@@ -1,0 +1,69 @@
+Cheat Sheet
+
+Certificate rotation = CERTLC. The post-deploy flow now uses Microsoft’s recommended Certificate Lifecycle pattern. Because the AKV VM extension isn’t available on RHEL/CentOS, we follow Microsoft’s guidance to schedule the official script_for_not_supported_ARC_on_Linux_distro that polls Key Vault and applies updates. We wrapped it with a safe systemd timer/service and a managed-identity runner that also provides a fall-back if the zip isn’t reachable.
+
+No image mutation, still immutable. Certs are injected/rotated at runtime via AKV (managed identity). The image stays clean and reproducible.
+
+Provider loop for agents stays. linux/catalog.json + 20_catalog_prestage.sh continue to stage agent installers with strict SHA-256 verification and an allowlist.
+
+What’s inside (runnable)
+
+azure-pipelines-rhel9.yml – ADO pipeline (Validate → Build Gen2 → optional Gen1 → OpenSCAP → Smoke → Publish).
+
+linux/packer/ – rhel9-server-lvm.json (Gen2) and rhel9-server-lvmgen1.json (Gen1).
+
+linux/scripts/ – prereqs, hardening, catalog pre-stage, cleanup, deprovision.
+
+linux/catalog.json – TEMPLATE with placeholders (you must replace URLs + SHA-256).
+
+ansible/
+
+postdeploy.yml – runs agent_enroll, and optionally certlc_runner.
+
+roles/agent_enroll – examples for CrowdStrike/Tanium/Splunk UF enrollment.
+
+roles/certlc_runner – installs & schedules CERTLC:
+
+Downloads the official CERTLC zip (you set the URL at a pinned commit + SHA-256).
+
+Sets /etc/certlc/certlc.env, installs certlc-run.service + certlc-run.timer.
+
+If the official zip isn’t available, the runner falls back to a managed-identity script that reads from AKV and writes PEM (or cert+key) idempotently, then restarts your service if changed.
+
+tests/linux/ – OpenSCAP minimal profile + smoke test (boot VM from SIG and verify).
+
+tools/policy-guard.sh – fail-fast governance for the catalog (allowlist, HTTPS, SHA-256, size budget).
+
+README_RHEL9_TURNKEY.md & HOWTO_RHEL9_TURNKEY.md – expansive, step-by-step guides (callouts that this is a template).
+
+How to use it (super short)
+
+Edit linux/catalog.json → your internal artifact URLs + real SHA-256 values (required).
+
+Queue azure-pipelines-rhel9.yml with your SIG params (Gen2 builds by default; set useGen1: true to also produce Gen1).
+
+Post-deploy run: ansible/postdeploy.yml.
+
+In ansible/group_vars/all.yml set:
+
+enable_certlc: true
+certlc_zip_url: "https://github.com/Azure/certlc/raw/042b69a7a4602bfe24550999c5aa0ef2f40d7aee/.scripts/script_for_not_supported_ARC_on_Linux_distro.zip"
+certlc_zip_sha256: "<PUT_THE_REAL_SHA256_OF_THE_ZIP>"
+akv_name: "molina-akv"
+cert_object_name: "service-tls-pem"   # or "service-tls" + pair mode
+target_mode: "pem"                    # or "pair"
+cert_restart_service: "nginx"         # optional
+certlc_poll_interval: "1h"
+
+
+The role will verify the zip’s SHA-256, schedule the official script, and create the timer. If the official script isn’t present, it uses the built-in managed-identity runner to fetch from AKV and update on change.
+
+This design implements Microsoft’s CERTLC architecture for Linux where the AKV extension isn’t supported.
+
+Why this is the right pattern
+
+Microsoft-aligned: AKV extension not available on RHEL/CentOS → use the scheduled CERTLC script to poll Key Vault and apply certs. Our implementation follows that model to the letter and keeps the image immutable.
+
+Operationally safe: systemd timer with jitter, idempotent writes, 0600 perms, optional service restart on change, and strict integrity checks for everything we download.
+
+Drop-in: You can flip this on or off with one variable (enable_certlc). 

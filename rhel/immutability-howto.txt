@@ -1,0 +1,164 @@
+RHEL9 TURNKEY – WHY THIS PIPELINE & IMAGE DESIGN (IMMUTABILITY EXPLAINED)
+
+Audience: Platform owners, operators, and DevOps engineers. Goal: understand why our Azure DevOps (ADO) → Packer → Shared Image Gallery (SIG) pipeline, plus minimal post‑deploy Ansible, is deliberately engineered to achieve immutability, security, speed, and repeatability.
+
+--------------------------------------------------------------------
+0) TL;DR
+--------------------------------------------------------------------
+• We build **immutable, versioned golden images** in a controlled pipeline, publish them to **Azure Shared Image Gallery**, and keep post‑deploy configuration as thin as possible.
+• We **stage** agents and tools (installers only) during image build, but **do not enroll** or inject secrets. Enrollment and environment‑specific details happen **after provisioning** using AKV‑sourced values.
+• Certificates are **never baked**; we use Microsoft’s CERTLC model to rotate them at runtime with **Managed Identity**. The image remains immutable.
+• Every release is validated automatically (lint → packer validate → OpenSCAP → smoke test) before publishing.
+• The result: **predictable, fast, auditable** servers with minimal drift and simple rollbacks.
+
+--------------------------------------------------------------------
+1) IMMUTABILITY PRINCIPLES WE FOLLOW
+--------------------------------------------------------------------
+1) **No mutable state in the image**: Avoid embedding anything that will change per environment (secrets, tenant IDs, workspace IDs, certs). 
+2) **Layered responsibility**: Image captures OS, hardening, and staged binaries. Post‑deploy captures enrollment, endpoints, and environment bindings.
+3) **Reproducibility over SSH‑wizardry**: Builds are deterministically scripted and reviewed, not run by hand on a snowflake server.
+4) **Version everything**: Image versions, scripts, catalogs, and pipeline configs are all source‑controlled and traceable.
+5) **Automate validation**: Don’t trust; verify with compliance and boot tests per release.
+6) **Prefer pull from AKV with MI**: No secrets on disk; rely on Key Vault + Managed Identity for runtime material (certs, API keys).
+
+--------------------------------------------------------------------
+2) DESIGN OVERVIEW
+--------------------------------------------------------------------
+• **Pipeline**: Azure DevOps YAML runs stages: Validate → Build → Compliance → Smoke → Publish.
+• **Image Build**: HashiCorp Packer (azure‑arm builder) creates RHEL9 images, pushing versions to SIG (Gen2 default, optional Gen1).
+• **Provisioners**: Minimal shell scripts apply OS updates, hardening, and **stage** agent installers (catalog‑driven loop with SHA‑256 verification).
+• **Governance**: A policy guard blocks non‑HTTPS URLs, missing hashes, and non‑allowlisted items.
+• **Validation**: Temporary VM boots the new image; OpenSCAP minimal profile runs; smoke test verifies staged content and baseline services. 
+• **Post‑Deploy**: Ansible runs only what must be environment‑aware (agent enrollment) and **optional** CERTLC certificate rotation setup. 
+• **Distribution**: Consumers pull from SIG by version or “latest,” with lifecycle policies pruning old builds.
+
+--------------------------------------------------------------------
+3) KEY CHOICES THAT ENABLE IMMUTABILITY
+--------------------------------------------------------------------
+A) **Staging vs. Enrollment**
+   We put agent **installers** in `/opt/stage/Tools/<id>/<version>` to guarantee availability and speed, but we **don’t enroll** (no CID, keys, tenant IDs). Enrollment requires runtime values and happens post‑deploy. 
+   • Benefit: No secrets in images, no re‑image needed for policy changes, and minimal outbound dependency during provisioning.
+
+B) **No certificates in images**
+   We implement Microsoft’s certificate lifecycle pattern for Linux (CERTLC timer). Certificates and keys reside in AKV; VMs fetch and apply updates with MI, restarting services only if files change.
+   • Benefit: Real immutability for images; rotations and rollbacks are centralized and auditable.
+
+C) **Catalog with SHA‑256 + allowlist**
+   The staging loop consumes a JSON catalog with strict integrity rules. Builds fail fast on placeholders or non‑HTTPS sources.
+   • Benefit: Supply‑chain hygiene; deterministic and reviewable.
+
+D) **Minimal provisioners; hardening baked**
+   SELinux enforcing, firewalld, crypto policies, auditd, SSH hardening are all set during build—no reliance on post‑deploy scripts or day‑2 ops for the baseline.
+   • Benefit: Every VM boots secure by default; less drift and fewer “it worked on staging” surprises.
+
+E) **OpenSCAP + boot smoke tests**
+   Each release is proven to boot and meet minimal compliance.
+   • Benefit: Catch regressions before images hit SIG consumers; reduces failed deployments downstream.
+
+F) **SIG as the distribution of truth**
+   Images are immutable artifacts with semantic versions. Consumers pin or pull latest. Lifecycle policies retire old versions.
+   • Benefit: Simple rollbacks; consistent fleet composition; easier audit.
+
+--------------------------------------------------------------------
+4) WHAT WE DELIBERATELY DO **NOT** DO (ANTI‑PATTERNS AVOIDED)
+--------------------------------------------------------------------
+• Don’t embed environment secrets, certs, or IDs in images.
+• Don’t invoke long, stateful post‑deploy configuration that changes baseline OS.
+• Don’t pull installers ad hoc from blob URLs at provision time (fragile, slow, unaudited).
+• Don’t rely on manual golden VM snapshots (snowflakes). 
+• Don’t hide integrity checks—hashes are required and enforced.
+
+--------------------------------------------------------------------
+5) SECURITY MODEL & SUPPLY‑CHAIN HYGIENE
+--------------------------------------------------------------------
+• **Managed Identity to AKV**: No long‑lived credentials; runtime tokens via IMDS only.
+• **AKV RBAC**: Limit to “Secrets User” (and certificate read if required). Narrow vault scopes by app/environment.
+• **Integrity controls**: SHA‑256 for staged binaries; HTTPS only. 
+• **Filesystem hygiene**: Private key files written 0600; machine‑id reset before capture; waagent deprovision runs.
+• **Auditability**: AKV version history, ADO run logs, OpenSCAP reports, and systemd journals create a complete audit trail.
+
+--------------------------------------------------------------------
+6) RELIABILITY, SPEED, AND COST OUTCOMES
+--------------------------------------------------------------------
+• **Faster provisioning**: Staged installers avoid external fetch during boot; agents enroll quickly using local bits + AKV values.
+• **Fewer failures**: Pre‑built hardening + smoke tests eliminate many class‑of‑errors seen in mutable pipelines.
+• **Reduced drift**: Golden image encodes baseline; post‑deploy is small and predictable.
+• **Licensing efficiency**: Shifting bulk config left reduces long‑running post‑deploy runs that inflate inventory counts.
+• **Cheap rollbacks**: Switching SIG versions is faster than re‑running post‑deploy playbooks attempting to “undo” change.
+
+--------------------------------------------------------------------
+7) OPERATIONS RUNBOOK (HIGH LEVEL)
+--------------------------------------------------------------------
+Release
+1) Update `linux/catalog.json` (URLs + SHA‑256). 
+2) Increment image version in pipeline parameters. 
+3) Queue pipeline → Validate, Build, Compliance, Smoke, Publish. 
+4) Share SIG version to consumers; optionally set “latest” alias.
+
+Provision
+1) VM created from SIG (Gen2 preferred). 
+2) Run `ansible/postdeploy.yml` (agent enrollment; **enable_certlc** if needed). 
+3) Verify enrollment and cert paths; start workloads.
+
+Rotation & drift control
+1) Cert rotation → update AKV version; CERTLC applies change on next timer tick (or on demand). 
+2) Agent policy changes → handled by respective tools without image rebuild. 
+3) Quarterly → base image refresh (OS updates + hardening), rev image version, retire old one in SIG.
+
+Monitoring
+• Collect OpenSCAP reports and smoke outputs per release. 
+• Ship journal logs (certlc‑run.service) and agent status to Log Analytics.
+• Alert on failed cert runs or uncommon error counts.
+
+--------------------------------------------------------------------
+8) TRADE‑OFFS & WHY THEY’RE WORTH IT
+--------------------------------------------------------------------
+• **Slightly larger images** due to staged installers → worth it for provision speed and offline safety.
+• **Two‑step configuration** (build vs post‑deploy) → clearer separation of concerns, safer updates, better immutability.
+• **Strict catalog policy** requires process discipline → repays in predictable builds and fewer security findings.
+• **OpenSCAP minimal profile** is not a full CIS benchmark → but a fast gate that catches major regressions; deeper scans can run out‑of‑band.
+
+--------------------------------------------------------------------
+9) KPIs TO WATCH
+--------------------------------------------------------------------
+• Mean time to provision (from VM create to “ready”). 
+• Post‑deploy error rate and rerun count.
+• Image build success rate and gate failures (policy guard, OpenSCAP).
+• Median time to rotate/rollback a certificate.
+• % fleet on “current” image version; drift deltas vs baseline.
+
+--------------------------------------------------------------------
+10) FAQ
+--------------------------------------------------------------------
+Q: Why not just do everything with Ansible post‑build? 
+A: That’s mutable infra—slower, drift‑prone, harder to audit. We bake the baseline and keep post‑deploy tiny and environment‑aware.
+
+Q: Why stage installers instead of installing during post‑deploy?
+A: Guarantees availability and speed at boot time, removes external dependencies, and keeps enrollment decoupled from acquisition.
+
+Q: How do we handle zero‑day OS fixes?
+A: Cut a new image (small change set), validate, and republish. Meanwhile, if necessary, apply emergency mitigations at runtime and plan the image update in hours—not weeks.
+
+Q: What about secrets like agent keys?
+A: Always pulled from AKV via Managed Identity at runtime; never baked into images.
+
+Q: Can we support both Gen1 and Gen2?
+A: Yes—pipeline builds Gen2 by default and optionally Gen1 via parameter for legacy workloads.
+
+--------------------------------------------------------------------
+11) APPENDIX – FILE MAP (TURNKEY BUNDLE)
+--------------------------------------------------------------------
+• `azure-pipelines-rhel9.yml` – ADO pipeline (Validate → Build → Compliance → Smoke → Publish)
+• `linux/packer/*.json` – Packer templates (Gen2, Gen1 optional)
+• `linux/scripts/` – prereqs, hardening, catalog prestage, cleanup, deprovision
+• `linux/catalog.json` – tool/agent catalog with SHA‑256 & allowlist
+• `ansible/postdeploy.yml` – post‑deploy roles
+• `ansible/roles/agent_enroll` – agent enrollment examples
+• `ansible/roles/certlc_runner` – CERTLC rotation (official zip + MI fallback)
+• `tests/linux/*` – OpenSCAP + smoke tests
+• `tools/policy-guard.sh` – catalog policy gate
+
+--------------------------------------------------------------------
+12) CONCLUSION
+--------------------------------------------------------------------
+This architecture gives Molina a repeatable, secure, and auditable way to ship servers. By cleanly splitting the immutable baseline from environment‑specific runtime bindings (AKV via MI), you get faster deliveries, fewer outages, and a certifiably better compliance story—without ever sacrificing immutability.
